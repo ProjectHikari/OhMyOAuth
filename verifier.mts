@@ -79,25 +79,28 @@ export class Verifier {
   }
 
   private async privateMessage(a: Admission, value: string, signal: AbortSignal): Promise<boolean> {
-    try {
-      await this.call(a, 'send_private_msg', { message: value }, signal)
-      return true
-    } catch (error) {
-      // A timeout may have delivered the message, so only retry explicit rejections.
-      if (!signal.aborted && error instanceof Error && /^(?:error: )*(?:Error: )?OneBot调用失败，retcode=-?\d+$/.test(error.message)) {
+    const routes = ['group', 'friend', 'group'] as const
+    let lastRoute: typeof routes[number] = 'group'
+    for (const route of routes) {
+      if (signal.aborted) return false
+      if (route === 'friend') {
         try {
           const friends = await this.action(a.selfId, 'get_friend_list', {}, signal)
-          if (Array.isArray(friends) && friends.some(friend => String(friend?.user_id) === a.userId)) {
-            await this.action(a.selfId, 'send_private_msg', { user_id: Number(a.userId), message: value }, signal)
-            return true
-          }
-        } catch {
-          // Keep the admission waiting when no private delivery was confirmed.
-        }
+          if (!Array.isArray(friends) || !friends.some(item => String(item?.user_id) === a.userId)) continue
+        } catch { continue }
       }
-      if (!signal.aborted) this.warn(`私信未确认 - 群${a.groupId} 成员${a.userId}`)
-      return false
+      lastRoute = route
+      try {
+        if (route === 'friend') await this.action(a.selfId, 'send_private_msg', { user_id: Number(a.userId), message: value }, signal)
+        else await this.call(a, 'send_private_msg', { message: value }, signal)
+        return true
+      } catch (error) {
+        // A timeout or a closed connection can still have delivered the message.
+        if (!(error instanceof Error) || !/^(?:error: )*(?:Error: )?OneBot调用失败，retcode=-?\d+$/.test(error.message)) break
+      }
     }
+    if (!signal.aborted) this.warn(`私信未确认 - 群${a.groupId} 成员${a.userId} - ${lastRoute === 'friend' ? '好友私聊' : '群临时会话'}`)
+    return false
   }
 
   async receive(e: VerificationEvent): Promise<void> {
@@ -148,7 +151,7 @@ export class Verifier {
       try {
         await this.action(a.selfId, 'send_group_msg', { group_id: Number(a.groupId), message: [
           { type: 'at', data: { qq: a.userId } },
-          { type: 'text', data: { text: ' 请查看 Bot 私信，在 10 分钟内完成 GitHub 认证。没收到私信的话，请私聊 Bot 发送「开始」。' } },
+          { type: 'text', data: { text: ' 请查看 Bot 私信，在 10 分钟内完成 GitHub 认证。没收到私信的话，请从本群成员列表打开与 Bot 的临时会话，发送「开始」。' } },
         ] }, signal)
       } catch { if (!signal.aborted) this.warn(`群认证提示未确认 - 群${a.groupId}`) }
       await this.sendLink(a, signal)
