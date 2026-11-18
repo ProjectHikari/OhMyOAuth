@@ -156,7 +156,7 @@ export class Verifier {
     try {
       await this.action(a.selfId, 'send_group_msg', { group_id: Number(a.groupId), message: [
         { type: 'at', data: { qq: a.userId } },
-        { type: 'text', data: { text: ' 请在 10 分钟内完成 GitHub 认证。没收到 Bot 私信的话，请从本群成员列表打开临时会话，发送「开始」。' } },
+        { type: 'text', data: { text: ' 请在 10 分钟内完成Github验证。没收到 Bot 私信的话，请从本群成员列表打开临时会话，发送「开始」。' } },
       ] }, signal)
     } catch {
       if (!signal.aborted) this.warn(`群认证提示未确认 - 群${a.groupId}`)
