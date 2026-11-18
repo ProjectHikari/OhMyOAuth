@@ -168,7 +168,10 @@ export class Verifier {
     const link = new URL(startPath, this.cfg.origin)
     link.searchParams.set('ticket', attempt.ticket)
     if (!await this.privateMessage(a, `请打开链接完成 GitHub 认证，再将网页显示的验证码发给我：\n${link.href}`, signal)) {
-      if (attempt !== current) this.attempts.delete(key)
+      if (attempt !== current) {
+        if (current && current.until > this.now()) this.attempts.set(key, current)
+        else this.attempts.delete(key)
+      }
       return
     }
     if (a.deadline === undefined) {
@@ -218,12 +221,6 @@ export class Verifier {
         await this.privateMessage(a, 'GitHub 认证已完成，请把网页上的验证码发给我。', signal)
         return
       }
-      if (command?.[1] === '开始' && a.failures > 0 && !this.attempts.has(key)) {
-        await this.privateMessage(a, `请使用 /restart oauth 重试。剩余: ${maxFailures - a.failures}/3`, signal)
-        return
-      }
-      const active = this.attempts.get(key)
-      if (active?.state) { await this.privateMessage(a, '请先完成已打开的 GitHub 验证。', signal); return }
       if (a.phase === 'waiting') {
         const member = await this.member(a, signal)
         if (member.joined !== a.joinTime) { this.finish(a, 'left'); return }
@@ -232,7 +229,7 @@ export class Verifier {
           return
         }
       }
-      await this.sendLink(a, signal, true)
+      await this.sendLink(a, signal, command?.[1] === '开始')
     })
   }
 
@@ -241,7 +238,7 @@ export class Verifier {
     if (!candidate) return { status: 410, message: '链接已失效，请私聊 Bot 发送「开始」。' }
     return this.locked(candidate.key, async () => {
       if (candidate !== this.attempts.get(candidate.key) || candidate.state || this.now() >= candidate.until)
-        return { status: 410, message: '链接已失效。' }
+        return { status: 410, message: '链接已失效，请私聊 Bot 发送「开始」。' }
       if (method === 'GET') return { status: 200, start: true, remainingMs: candidate.until - this.now() }
       candidate.state = secret()
       candidate.verifier = secret()
