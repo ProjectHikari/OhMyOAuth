@@ -148,22 +148,31 @@ export class Verifier {
         this.review(a, '禁言操作未确认')
         return
       }
-      try {
-        await this.action(a.selfId, 'send_group_msg', { group_id: Number(a.groupId), message: [
-          { type: 'at', data: { qq: a.userId } },
-          { type: 'text', data: { text: ' 请查看 Bot 私信，在 10 分钟内完成 GitHub 认证。没收到私信的话，请从本群成员列表打开与 Bot 的临时会话，发送「开始」。' } },
-        ] }, signal)
-      } catch { if (!signal.aborted) this.warn(`群认证提示未确认 - 群${a.groupId}`) }
-      await this.sendLink(a, signal)
+      if (await this.announce(a, signal)) await this.sendLink(a, signal)
     })
+  }
+
+  private async announce(a: Admission, signal: AbortSignal): Promise<boolean> {
+    try {
+      await this.action(a.selfId, 'send_group_msg', { group_id: Number(a.groupId), message: [
+        { type: 'at', data: { qq: a.userId } },
+        { type: 'text', data: { text: ' 请在 10 分钟内完成 GitHub 认证。没收到 Bot 私信的话，请从本群成员列表打开临时会话，发送「开始」。' } },
+      ] }, signal)
+    } catch {
+      if (!signal.aborted) this.warn(`群认证提示未确认 - 群${a.groupId}`)
+      return false
+    }
+    a.deadline = this.now() + windowMs
+    this.save(a, 'pending')
+    return true
   }
 
   private async sendLink(a: Admission, signal: AbortSignal, reuse = false): Promise<void> {
     const key = admissionKey(a), now = this.now()
+    if (a.deadline === undefined || a.deadline <= now) return
     const current = this.attempts.get(key)
     const attempt = reuse && current && !current.state && current.until > now ? current :
-      { key, ticket: secret(), until: a.deadline ?? now + windowMs }
-    if (attempt.until <= now) return
+      { key, ticket: secret(), until: a.deadline }
     this.attempts.set(key, attempt)
     const link = new URL(startPath, this.cfg.origin)
     link.searchParams.set('ticket', attempt.ticket)
@@ -173,11 +182,6 @@ export class Verifier {
         else this.attempts.delete(key)
       }
       return
-    }
-    if (a.deadline === undefined) {
-      a.deadline = this.now() + windowMs
-      attempt.until = a.deadline
-      this.save(a, 'pending')
     }
   }
 
@@ -228,6 +232,7 @@ export class Verifier {
           this.review(a, '补发时无法确认验证禁言')
           return
         }
+        if (!await this.announce(a, signal)) return
       }
       await this.sendLink(a, signal, command?.[1] === '开始')
     })
