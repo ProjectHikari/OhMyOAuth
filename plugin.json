@@ -1,0 +1,6 @@
+{
+  "id": "me.ohmyoauth",
+  "command": ["${NODE}", "--disable-warning=ExperimentalWarning", "plugin.mts"],
+  "required": ["adapter.onebot"],
+  "events": { "body.onebot.verification": "parallel" }
+}
