@@ -2,7 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { Work } from '../shared/runtime.mts'
 import { type VerificationEvent } from '../onebot/adapter.mts'
 import { AdmissionStore, admissionKey, type Admission, type Phase } from './store.mts'
-import { callbackPath, startPath, githubURL, hash, secret, verifyGitHub, type OAuthConfig } from './oauth.mts'
+import { callbackFailure, callbackPath, startPath, githubURL, hash, OAuthFailure, secret, verifyGitHub, type OAuthConfig } from './oauth.mts'
 
 const minute = 60_000
 const windowMs = 10 * minute
@@ -265,16 +265,20 @@ export class Verifier {
       this.attempts.delete(pending.key)
       try {
         const code = query.get('code')
-        if (query.has('error') || !code || code.length > 512) throw new Error('OAuth failed')
+        if (query.has('error') || !code || code.length > 512) throw callbackFailure(query.get('error'))
         await this.github(this.cfg, code, pending.verifier!, signal)
-      } catch {
+      } catch (error) {
         if (signal.aborted || this.now() >= a.deadline) return { status: 410, cookie, message: '验证会话已结束。' }
-        a.failures++
+        const reason = error instanceof OAuthFailure ? error.reason : 'internal'
+        this.warn(`GitHub OAuth 失败 - 群${a.groupId} 成员${a.userId} - ${reason}`)
+        const network = reason.endsWith(':network') || /:http_(?:429|5\d\d)$/.test(reason)
+        if (!network) a.failures++
         this.save(a)
         const left = maxFailures - a.failures
-        await this.privateMessage(a, left ? `验证失败，请使用 /restart oauth 重试。剩余: ${left}/3` :
+        await this.privateMessage(a, network ? `GitHub 暂时无法连接，请使用 /restart oauth 重试。本次未扣除次数，剩余: ${left}/3` :
+          left ? `验证失败，请使用 /restart oauth 重试。剩余: ${left}/3` :
           '验证失败。剩余: 0/3，请联系群管理员。', signal)
-        return { status: 200, cookie, message: 'GitHub 验证失败，请查看 Bot 私信。' }
+        return { status: 200, cookie, message: network ? '暂时无法连接 GitHub，请私聊 Bot 发送 /restart oauth。' : 'GitHub 验证失败，请查看 Bot 私信。' }
       }
       if (this.now() >= a.deadline) return { status: 410, cookie, message: '验证会话已过期。' }
       const code = 'OMO-' + randomBytes(16).toString('base64url')

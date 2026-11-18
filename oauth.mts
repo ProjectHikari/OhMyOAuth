@@ -39,21 +39,65 @@ export function githubURL(cfg: OAuthConfig, state: string, verifier: string): st
   return url.href
 }
 
+const knownGitHubErrors = new Set([
+  'access_denied', 'bad_verification_code', 'incorrect_client_credentials',
+  'redirect_uri_mismatch', 'unverified_user_email', 'application_suspended',
+  'invalid_grant', 'invalid_request',
+])
+
+export class OAuthFailure extends Error {
+  readonly reason: string
+  constructor(reason: string) { super(reason); this.reason = reason }
+}
+
+export function callbackFailure(error: string | null): OAuthFailure {
+  return new OAuthFailure(error && knownGitHubErrors.has(error) ? 'authorize:' + error : 'authorize:invalid_callback')
+}
+
+const connectErrors = new Set(['UND_ERR_CONNECT_TIMEOUT', 'EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH'])
+
+async function githubResponse(stage: 'exchange' | 'profile', run: () => Promise<Response>, signal: AbortSignal): Promise<any> {
+  let response
+  for (let attempt = 0; ; attempt++) {
+    try { response = await run(); break }
+    catch (error) {
+      signal.throwIfAborted()
+      const cause = error instanceof Error ? error.cause as NodeJS.ErrnoException | undefined : undefined
+      // Only retry failures before the request could reach GitHub.
+      if (attempt === 0 && cause?.code && connectErrors.has(cause.code)) continue
+      throw new OAuthFailure(stage + ':network')
+    }
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {})
+    throw new OAuthFailure(stage + ':http_' + response.status)
+  }
+  let data
+  try { data = await response.json() }
+  catch { throw new OAuthFailure(stage + ':invalid_response') }
+  if (!data || typeof data !== 'object') throw new OAuthFailure(stage + ':invalid_response')
+  return data
+}
+
 export async function verifyGitHub(cfg: OAuthConfig, code: string, verifier: string, signal: AbortSignal, request = fetch): Promise<void> {
-  const timeout = AbortSignal.any([signal, AbortSignal.timeout(8000)])
-  const response = await request('https://github.com/login/oauth/access_token', {
-    method: 'POST', redirect: 'error', signal: timeout,
+  const deadline = () => AbortSignal.any([signal, AbortSignal.timeout(13_000)])
+  const token = await githubResponse('exchange', () => request('https://github.com/login/oauth/access_token', {
+    method: 'POST', redirect: 'error', signal: deadline(),
     headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: cfg.clientId, client_secret: cfg.clientSecret, code,
       redirect_uri: cfg.origin + callbackPath, code_verifier: verifier }),
-  })
-  if (!response.ok) { await response.body?.cancel(); throw new Error('GitHub token exchange failed') }
-  const token = await response.json()
-  if (token.error || typeof token.access_token !== 'string' || token.token_type?.toLowerCase() !== 'bearer' || token.scope)
-    throw new Error('GitHub returned an invalid or overprivileged token')
-  const profile = await request('https://api.github.com/user', { signal: timeout, redirect: 'error',
-    headers: { accept: 'application/vnd.github+json', authorization: 'Bearer ' + token.access_token } })
-  if (!profile.ok) { await profile.body?.cancel(); throw new Error('GitHub account lookup failed') }
-  const user = await profile.json()
-  if (!Number.isSafeInteger(user.id) || user.id <= 0) throw new Error('GitHub account has no valid ID')
+  }), signal)
+  if (token.error) {
+    const error = knownGitHubErrors.has(token.error) ? token.error : 'oauth_error'
+    throw new OAuthFailure('exchange:' + error)
+  }
+  if (typeof token.access_token !== 'string' || typeof token.token_type !== 'string' || token.token_type.toLowerCase() !== 'bearer')
+    throw new OAuthFailure('exchange:invalid_token')
+  if (typeof token.scope === 'string' ? token.scope.trim() !== '' : token.scope != null)
+    throw new OAuthFailure('exchange:overprivileged')
+  const user = await githubResponse('profile', () => request('https://api.github.com/user', {
+    signal: deadline(), redirect: 'error',
+    headers: { accept: 'application/vnd.github+json', authorization: 'Bearer ' + token.access_token },
+  }), signal)
+  if (!Number.isSafeInteger(user.id) || user.id <= 0) throw new OAuthFailure('profile:invalid_account')
 }
